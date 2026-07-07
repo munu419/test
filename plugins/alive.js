@@ -17,7 +17,7 @@ const botName = getBotName(sessionId, "KAVI X MD")
 // undefined, and passing {image:{url: undefined}} to Baileys crashes with
 // "Cannot read properties of undefined (reading 'toString')". Always fall
 // back to a real image URL.
-const botLogo = getBotLogo(sessionId, config.ALIVE_IMG || "https://files.catbox.moe/04jdju.jpg")
+const botLogo = getBotLogo(sessionId, config.ALIVE_IMG || "https://files.catbox.moe/kmfr8j.jpg")
 
 let des = `👋 𝙷𝚎𝚕𝚕𝚘 ${pushname} 𝙸'𝚖 𝚊𝚕𝚒𝚟𝚎 𝚗𝚘𝚠
 
