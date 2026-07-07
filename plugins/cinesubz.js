@@ -160,8 +160,8 @@ function cleanTitle(t) {
 // COMMAND
 // ═════════════════════════════════════════════════════════════════════════════
 cmd({
-  pattern: "cinesubz2",
-  alias: ["cs2", "csz"],
+  pattern: "cinesubzmovie",
+  alias: ["csm", "cs2", "csz"],
   react: "🎬",
   desc: "CineSubz — Movies & TV Series download",
   category: "downloader",
@@ -197,19 +197,28 @@ cmd({
       })),
     }, mek);
 
-    // ── Selection ─────────────────────────────────────────────────────────────
-    makeListener(conn, from, searchMsg.key.id, "cs2_sel", display.length, async (idx, msg) => {
+    // ── Selection — MULTI REPLY ───────────────────────────────────────────────
+    const searchHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== searchMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "cs2_sel", display.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා — multi-reply
       await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
       const item = display[idx];
       const isTV = item.type === "TV";
       log("selected:", item.title, "| TV:", isTV);
-
       if (isTV) {
-        await handleTVShow(conn, from, sender, msg, item, botName);
+        handleTVShow(conn, from, sender, msg, item, botName).catch(console.error);
       } else {
-        await handleMovie(conn, from, sender, msg, item, botName);
+        handleMovie(conn, from, sender, msg, item, botName).catch(console.error);
       }
-    });
+    };
+    conn.ev.on("messages.upsert", searchHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", searchHandler), TIMEOUT);
 
   } catch (e) {
     console.error("[cs2] error:", e);
@@ -259,10 +268,21 @@ async function handleMovie(conn, from, sender, quotedMsg, item, botName) {
       })),
     }, quotedMsg);
 
-    makeListener(conn, from, qualityMsg.key.id, "cs2_q", downloads.length, async (idx, msg) => {
+    // Movie quality — MULTI REPLY
+    const qHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== qualityMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "cs2_q", downloads.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා
       await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
-      await downloadAndSend(conn, from, msg, downloads[idx], title, poster, botName);
-    });
+      downloadAndSend(conn, from, msg, downloads[idx], title, poster, botName).catch(console.error);
+    };
+    conn.ev.on("messages.upsert", qHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", qHandler), TIMEOUT);
 
   } catch (e) {
     console.error("[cs2] handleMovie error:", e);
@@ -315,10 +335,21 @@ async function handleTVShow(conn, from, sender, quotedMsg, item, botName) {
       })),
     }, quotedMsg);
 
-    makeListener(conn, from, seasonMsg.key.id, "cs2_se", seasons.length, async (idx, msg) => {
+    // Season select — MULTI REPLY
+    const seHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== seasonMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "cs2_se", seasons.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා
       await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
-      await showEpisodes(conn, from, sender, msg, title, poster, tb, seasons[idx], seasons[idx].season || idx + 1, botName);
-    });
+      showEpisodes(conn, from, sender, msg, title, poster, tb, seasons[idx], seasons[idx].season || idx + 1, botName).catch(console.error);
+    };
+    conn.ev.on("messages.upsert", seHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", seHandler), TIMEOUT);
 
   } catch (e) {
     console.error("[cs2] handleTVShow error:", e);
@@ -334,32 +365,33 @@ async function showEpisodes(conn, from, sender, quotedMsg, title, poster, tb, se
     const episodes = seasonData.episodes || [];
     if (!episodes.length) return conn.sendMessage(from, { text: "❎ No episodes found." }, { quoted: quotedMsg });
 
-    // Show in pages of 10
     async function showPage(start) {
       const page = episodes.slice(start, start + 10);
       const hasMore = start + 10 < episodes.length;
 
       let body = `📺 *${title}* — Season ${seasonNum}\n`;
       body += `Episodes (${start + 1}–${start + page.length} of ${episodes.length}):\n\n`;
+      body += `*0.* 🎯 සියලු Episodes (All)\n`;
       page.forEach((ep, i) => {
-        body += `${start + i + 1}. EP${ep.number} — ${ep.title || "Episode " + ep.number} (${ep.date || ""})\n`;
+        body += `*${start + i + 1}.* EP${ep.number} — ${ep.title || "Episode " + ep.number}${ep.date ? ` (${ep.date})` : ""}\n`;
       });
-      if (hasMore) body += `\n_"0" reply කරන්න next page_`;
 
-      const buttons = page.map((ep, i) => ({
-        text: `EP${ep.number}${ep.title ? " — " + ep.title.substring(0, 30) : ""}`,
-        id: `cs2_ep_${start + i}`,
-      }));
+      const buttons = [{ text: "🎯 All Episodes (Season)", id: "cs2_all_eps" }];
+      page.forEach((ep, i) => {
+        buttons.push({
+          text: `EP${ep.number}${ep.title ? " — " + ep.title.substring(0, 25) : ""}`,
+          id: `cs2_ep_${start + i}`,
+        });
+      });
       if (hasMore) buttons.push({ text: "▶️ More episodes", id: `cs2_more_${start + 10}` });
 
       const epMsg = await conn.sendButton(from, {
-        header: `📺 Season ${seasonNum}`,
+        header: `📺 Season ${seasonNum} (${episodes.length} eps)`,
         body,
         footer: botName,
         buttons,
       }, quotedMsg);
 
-      // Special "more" listener
       const handler = async update => {
         const msg = update.messages?.[0];
         if (!msg?.message || msg.key.remoteJid !== from) return;
@@ -367,7 +399,7 @@ async function showEpisodes(conn, from, sender, quotedMsg, title, poster, tb, se
         if (!ctx || ctx.stanzaId !== epMsg.key.id) return;
         const body2 = replyBody(msg.message);
 
-        // More button
+        // ── More pages ──
         if (body2.startsWith("cs2_more_")) {
           const next = parseInt(body2.split("_")[2]);
           conn.ev.off("messages.upsert", handler);
@@ -377,12 +409,21 @@ async function showEpisodes(conn, from, sender, quotedMsg, title, poster, tb, se
           return;
         }
 
+        // ── All episodes ──
+        if (body2 === "cs2_all_eps" || body2.trim() === "0") {
+          conn.ev.off("messages.upsert", handler);
+          clearTimeout(timer);
+          await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
+          await downloadAllEpisodes(conn, from, sender, msg, title, poster, episodes, seasonNum, botName);
+          return;
+        }
+
+        // ── Single episode ──
         const idx = resolveIdx(body2, "cs2_ep", episodes.length);
         if (idx === -1) return;
-        conn.ev.off("messages.upsert", handler);
-        clearTimeout(timer);
+        // multi-reply: handler NOT removed — user can select multiple episodes
         await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
-        await handleEpisode(conn, from, sender, msg, title, poster, tb, episodes[idx], seasonNum, botName);
+        handleEpisode(conn, from, sender, msg, title, poster, tb, episodes[idx], seasonNum, botName).catch(console.error);
       };
 
       const timer = setTimeout(() => conn.ev.off("messages.upsert", handler), TIMEOUT);
@@ -393,6 +434,116 @@ async function showEpisodes(conn, from, sender, quotedMsg, title, poster, tb, se
 
   } catch (e) {
     console.error("[cs2] showEpisodes error:", e);
+    conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ALL EPISODES DOWNLOAD
+// ═════════════════════════════════════════════════════════════════════════════
+async function downloadAllEpisodes(conn, from, sender, quotedMsg, title, poster, episodes, seasonNum, botName) {
+  try {
+    // First ep quality get
+    const firstEpData = await retry(() => apiEpisode(episodes[0].url), 3, 2000, "first-ep");
+    if (!firstEpData?.downloadUrl?.length) {
+      return conn.sendMessage(from, { text: "❎ Download links not found." }, { quoted: quotedMsg });
+    }
+
+    const downloads = (firstEpData.downloadUrl || []).sort((a, b) => {
+      const r = s => parseInt((s.quality || "").match(/\d+/)?.[0]) || 0;
+      return r(b) - r(a);
+    });
+
+    // Quality select
+    let qText = `🎯 *All Episodes Quality Select*\n*${title} — Season ${seasonNum}*\n*Total: ${episodes.length} episodes*\n\n`;
+    downloads.forEach((d, i) => {
+      qText += `*${i + 1}.* ${d.quality} (${d.size || "?"}) [${d.language || ""}]\n`;
+    });
+
+    const qualityMsg = await conn.sendButton(from, {
+      header: `🎯 Season ${seasonNum} — All ${episodes.length} eps`,
+      body: qText + "\nQuality select කරන්න:",
+      footer: botName,
+      buttons: downloads.map((d, i) => ({
+        text: `${d.quality?.includes("1080") ? "🔥" : d.quality?.includes("720") ? "⚡" : "⬇️"} ${d.quality} (${d.size || "?"})`,
+        id: `cs2_aq_${i}`,
+      })),
+    }, quotedMsg);
+
+    makeListener(conn, from, qualityMsg.key.id, "cs2_aq", downloads.length, async (qIdx, qMsg) => {
+      const chosenQuality = downloads[qIdx];
+      await conn.sendMessage(from, { react: { text: "📥", key: qMsg.key } });
+      await conn.sendMessage(from, {
+        text:
+          `⬇️ *Downloading all ${episodes.length} episodes...*\n` +
+          `📺 *${title} — Season ${seasonNum}*\n` +
+          `💎 *Quality:* ${chosenQuality.quality}\n\n_Please wait..._`
+      }, { quoted: qMsg });
+
+      let success = 0, failed = 0;
+
+      for (const ep of episodes) {
+        try {
+          log(`📥 All-eps: EP${ep.number}`);
+          const epData = await retry(() => apiEpisode(ep.url), 3, 2000, `ep${ep.number}`);
+          const epDownloads = (epData?.downloadUrl || []).sort((a, b) => {
+            const r = s => parseInt((s.quality || "").match(/\d+/)?.[0]) || 0;
+            return r(b) - r(a);
+          });
+
+          // Same quality index — fallback to first if not available
+          const dl = epDownloads[qIdx] || epDownloads[0];
+          if (!dl) { failed++; continue; }
+
+          const epTitle = `${title} S${String(seasonNum).padStart(2,"0")}E${String(ep.number).padStart(2,"0")}`;
+          const links = await retry(() => apiDownload(dl.link), 3, 3000, `dl-ep${ep.number}`);
+          const url = bestLink(links);
+          if (!url) { failed++; continue; }
+
+          const epPoster = epData.imageUrls?.[0] || poster;
+          const epThumb = await thumb(epPoster);
+          const safeTitle = epTitle.replace(/[^\w\s\-]/g, "").replace(/\s+/g, "_").substring(0, 50);
+          const fileName = `🎬${botName}🎬${safeTitle}_(${dl.quality}).mp4`;
+
+          const docMsg = await conn.sendMessage(from, {
+            document: { url },
+            mimetype: "video/mp4",
+            fileName,
+            jpegThumbnail: epThumb,
+            caption:
+              `📺 *${epTitle}*\n` +
+              `💎 *Quality:* ${dl.quality}\n` +
+              `📦 *Size:* ${dl.size || "?"}\n\n` +
+              `*⏤͟͟͞͞★❮ ${botName} 〽️𝗢𝗩𝗜𝗘𝗦 ❯⏤͟͟͞͞★*`,
+          }, { quoted: qMsg });
+
+          await conn.sendMessage(from, { react: { text: "✅", key: docMsg.key } });
+          success++;
+          log(`✅ All-eps: EP${ep.number} done`);
+
+        } catch (e) {
+          failed++;
+          log(`❌ All-eps: EP${ep.number} failed:`, e.message);
+          await conn.sendMessage(from, {
+            text: `❌ *EP${ep.number} failed*\n${e.message}`
+          }, { quoted: qMsg });
+        }
+      }
+
+      // Summary
+      await conn.sendMessage(from, {
+        text:
+          `${success === episodes.length ? "✅" : "⚠️"} *Download Complete!*\n\n` +
+          `📺 *${title} — Season ${seasonNum}*\n` +
+          `✅ *Success:* ${success}/${episodes.length}\n` +
+          `❌ *Failed:* ${failed}\n\n` +
+          `*⏤͟͟͞͞★❮ ${botName} 〽️𝗢𝗩𝗜𝗘𝗦 ❯⏤͟͟͞͞★*`
+      }, { quoted: qMsg });
+
+    });
+
+  } catch (e) {
+    console.error("[cs2] downloadAllEpisodes error:", e);
     conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
   }
 }
@@ -434,10 +585,21 @@ async function handleEpisode(conn, from, sender, quotedMsg, seriesTitle, poster,
       })),
     }, quotedMsg);
 
-    makeListener(conn, from, qualityMsg.key.id, "cs2_eq", downloads.length, async (idx, msg) => {
+    // Episode quality — MULTI REPLY
+    const eqHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== qualityMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "cs2_eq", downloads.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා
       await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
-      await downloadAndSend(conn, from, msg, downloads[idx], epTitle, epPoster, botName);
-    });
+      downloadAndSend(conn, from, msg, downloads[idx], epTitle, epPoster, botName).catch(console.error);
+    };
+    conn.ev.on("messages.upsert", eqHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", eqHandler), TIMEOUT);
 
   } catch (e) {
     console.error("[cs2] handleEpisode error:", e);
