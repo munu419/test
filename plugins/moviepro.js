@@ -10,8 +10,8 @@ const { getSettings } = require("../lib/settings");
 const { getContentType } = require("@whiskeysockets/baileys");
 
 const API      = "https://moviepro-mocha.vercel.app/api";
-const CHANNEL  = "https://whatsapp.com/channel/0029VbCvEPYF6smqypvOM042";
-const BANNER   = "https://raw.githubusercontent.com/gojo1777/SAYURA-LK-BOT-help/refs/heads/main/file_00000000f2d47208a24ba4f8ead1263d.png";
+const CHANNEL  = "https://whatsapp.com/channel/0029Vb8VPsxBKfi2WHCVgV0J";
+const BANNER   = "https://files.catbox.moe/kmfr8j.jpg";
 const TIMEOUT  = 5 * 60 * 1000;
 const sleep    = ms => new Promise(r => setTimeout(r, ms));
 
