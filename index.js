@@ -89,7 +89,7 @@ let handleAutoForward;
 try { handleAutoForward = require("./plugins/forward").handleAutoForward; } catch {}
 
 // ================= Global Variables =================
-const ownerNumber = [config.OWNER_NUMBER || "94714390328"];
+const ownerNumber = [config.OWNER_NUMBER || "94743826406"];
 const botName = "KAVI X MD";
 
 // Mongo නෑ දැන් — bot එකක් විතරයි run කරන්නේ, session එකත් එකයි.
