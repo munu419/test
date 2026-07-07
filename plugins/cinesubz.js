@@ -160,7 +160,7 @@ function cleanTitle(t) {
 // COMMAND
 // ═════════════════════════════════════════════════════════════════════════════
 cmd({
-  pattern: "cinesubzmovie",
+  pattern: "cinesubz",
   alias: ["csm", "cs2", "csz"],
   react: "🎬",
   desc: "CineSubz — Movies & TV Series download",
