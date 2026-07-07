@@ -1,11 +1,36 @@
+// plugins/moviepro.js
+// MoviePro — Movies + TV Series full support (CineSubz2-style architecture)
+// API: moviepro-mocha.vercel.app
+
 const { cmd } = require("../command");
 const axios = require("axios");
 const sharp = require("sharp");
+const config = require("../config");
+const { getSettings } = require("../lib/settings");
+const { getContentType } = require("@whiskeysockets/baileys");
 
-const API = "https://moviepro-mocha.vercel.app/api";
-const FOOTER = "⏤͟͟͞͞★❮ 𝗦𝗔𝗬𝗨𝗥𝗔 𝗟𝗞 𝗫 𝗠𝗜𝗡𝗜 🎬 𝗠𝗢𝗩𝗜𝗘𝗣𝗥𝗢 ❯⏤͟͟͞͞★";
-const BANNER = "https://raw.githubusercontent.com/gojo1777/SAYURA-LK-BOT-help/refs/heads/main/file_00000000f2d47208a24ba4f8ead1263d.png";
+const API      = "https://moviepro-mocha.vercel.app/api";
+const CHANNEL  = "https://whatsapp.com/channel/0029VbCvEPYF6smqypvOM042";
+const BANNER   = "https://raw.githubusercontent.com/gojo1777/SAYURA-LK-BOT-help/refs/heads/main/file_00000000f2d47208a24ba4f8ead1263d.png";
+const TIMEOUT  = 5 * 60 * 1000;
+const sleep    = ms => new Promise(r => setTimeout(r, ms));
 
+// ── Logging ───────────────────────────────────────────────────────────────────
+function log(...a) { console.log(`[mp] [${new Date().toISOString()}]`, ...a); }
+
+// ── Retry ─────────────────────────────────────────────────────────────────────
+async function retry(fn, tries = 3, delay = 2000, label = "") {
+  for (let i = 1; i <= tries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      log(`❌ ${label} attempt ${i}/${tries}:`, e.message);
+      if (i === tries) throw e;
+      await sleep(delay * i);
+    }
+  }
+}
+
+// ── Formatters ────────────────────────────────────────────────────────────────
 function pad(n) { return String(n).padStart(2, "0"); }
 
 function fmtSize(bytes) {
@@ -21,174 +46,182 @@ function fmtRes(r) {
   return map[n] || (n >= 144 ? `${n}p` : r || "HD");
 }
 
-async function getThumbnail(url) {
-  try {
-    const res = await axios.get(url, { responseType: "arraybuffer", timeout: 10000 });
-    return await sharp(res.data).resize(320, 320).jpeg({ quality: 70 }).toBuffer();
-  } catch (e) {
-    return null;
-  }
+// ── API calls ─────────────────────────────────────────────────────────────────
+async function apiGet(path) {
+  const { data } = await axios.get(API + path, { timeout: 45000 });
+  return data;
 }
-
-async function apiGet(path, retries = 1) {
-  try {
-    const { data } = await axios.get(API + path, { timeout: 45000 });
-    return data;
-  } catch (e) {
-    if (retries > 0) {
-      await new Promise(r => setTimeout(r, 1500));
-      return apiGet(path, retries - 1);
-    }
-    throw e;
-  }
-}
-
-async function search(q, page = 1) {
+async function apiSearch(q, page = 1) {
   return apiGet(`/search?q=${encodeURIComponent(q)}&page=${page}&per_page=12`);
 }
-async function getDetails(id) { return apiGet(`/details/${id}`); }
-async function getDownloads(id) { return apiGet(`/downloads/${id}`); }
-async function getEpisodes(id, season = null) {
+async function apiDetails(id) { return apiGet(`/details/${id}`); }
+async function apiDownloads(id) { return apiGet(`/downloads/${id}`); }
+async function apiEpisodes(id, season = null) {
   return apiGet(`/episodes/${id}${season ? `?season=${season}` : ""}`);
 }
-async function getEpisode(id, season, episode) {
+async function apiEpisode(id, season, episode) {
   return apiGet(`/episode/${id}?season=${season}&episode=${episode}`);
 }
-
-// ── Base-compatible waitReply ─────────────────────────────────────────────────
-// User reply (quote) ක් අවශ්‍ය නෑ — same chat, same sender ගෙන් message ආවාම catch කරනවා
-function waitReply(conn, from, sender, timeout = 120000) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      conn.ev.off("messages.upsert", handler);
-      resolve(null);
-    }, timeout);
-
-    function handler(update) {
-      const msg = update.messages?.[0];
-      if (!msg?.message) return;
-      if (msg.key.remoteJid !== from) return;
-
-      const msgSender = msg.key.participant || msg.key.remoteJid;
-      const senderNum = sender.split("@")[0];
-      if (!msgSender.includes(senderNum)) return;
-
-      // Bot's own messages ignore කරනවා
-      if (msg.key.fromMe) return;
-
-      const text = (
-        msg.message.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        ""
-      ).trim();
-      if (!text) return;
-
-      clearTimeout(timer);
-      conn.ev.off("messages.upsert", handler);
-      resolve({ msg, text });
-    }
-
-    conn.ev.on("messages.upsert", handler);
-  });
+async function apiSubtitles(id, resourceId) {
+  return apiGet(`/subtitles/${id}/${resourceId}`);
 }
 
-async function sendVideo(conn, from, quoted, url, fileName, caption, thumbnail) {
+// ── Thumbnail ─────────────────────────────────────────────────────────────────
+async function thumb(url) {
   try {
-    await conn.sendMessage(from, {
-      document: { url },
-      mimetype: "video/mp4",
-      fileName,
-      caption,
-      jpegThumbnail: thumbnail,
-    }, { quoted });
-  } catch (e) {
-    const res = await axios.get(url, { responseType: "stream", timeout: 180000, maxRedirects: 5 });
-    await conn.sendMessage(from, {
-      document: { stream: res.data },
-      mimetype: "video/mp4",
-      fileName,
-      caption,
-      jpegThumbnail: thumbnail,
-    }, { quoted });
-  }
+    const { data } = await axios.get(url, { responseType: "arraybuffer", timeout: 12000 });
+    return await sharp(data).resize(320, 320, { fit: "cover" }).jpeg({ quality: 70 }).toBuffer();
+  } catch { return null; }
 }
 
-// ── Main command ──────────────────────────────────────────────────────────────
+// ── Reply helpers ─────────────────────────────────────────────────────────────
+function replyBody(message) {
+  if (!message) return "";
+  const type = getContentType(message);
+  if (type === "conversation") return message.conversation || "";
+  if (type === "extendedTextMessage") return message.extendedTextMessage?.text || "";
+  if (type === "buttonsResponseMessage") return message.buttonsResponseMessage?.selectedButtonId || "";
+  if (type === "listResponseMessage") return message.listResponseMessage?.singleSelectReply?.selectedRowId || "";
+  if (type === "templateButtonReplyMessage") return message.templateButtonReplyMessage?.selectedId || "";
+  if (type === "interactiveResponseMessage") {
+    try {
+      const n = message.interactiveResponseMessage?.nativeFlowResponseMessage;
+      return n ? (JSON.parse(n.paramsJson || "{}").id || n.name || "") : message.interactiveResponseMessage?.body?.text || "";
+    } catch { return message.interactiveResponseMessage?.body?.text || ""; }
+  }
+  return "";
+}
+
+function replyCtx(message) {
+  if (!message) return null;
+  return message.extendedTextMessage?.contextInfo
+    || message.buttonsResponseMessage?.contextInfo
+    || message.listResponseMessage?.contextInfo
+    || message.templateButtonReplyMessage?.contextInfo
+    || message.interactiveResponseMessage?.contextInfo
+    || null;
+}
+
+function resolveIdx(body, prefix, max) {
+  const n = parseInt(body, 10);
+  if (!isNaN(n) && String(n) === body.trim()) { const i = n - 1; return (i >= 0 && i < max) ? i : -1; }
+  const m = body.match(new RegExp(`^${prefix}_(\\d+)$`));
+  if (m) { const i = parseInt(m[1]); return (i >= 0 && i < max) ? i : -1; }
+  return -1;
+}
+
+// ── Listener factory (single-shot, auto cleanup) ─────────────────────────────
+function makeListener(conn, from, msgId, prefix, max, onSelect, onTimeout) {
+  const handler = async update => {
+    const msg = update.messages?.[0];
+    if (!msg?.message || msg.key.remoteJid !== from) return;
+    const ctx = replyCtx(msg.message);
+    if (!ctx || ctx.stanzaId !== msgId) return;
+    const body = replyBody(msg.message);
+    const idx = resolveIdx(body, prefix, max);
+    if (idx === -1) return;
+    conn.ev.off("messages.upsert", handler);
+    clearTimeout(timer);
+    await onSelect(idx, msg);
+  };
+  const timer = setTimeout(() => {
+    conn.ev.off("messages.upsert", handler);
+    onTimeout && onTimeout();
+  }, TIMEOUT);
+  conn.ev.on("messages.upsert", handler);
+  return handler;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// COMMAND
+// ═════════════════════════════════════════════════════════════════════════════
 cmd({
   pattern: "moviepro",
   alias: ["mp", "film", "series"],
   react: "🎬",
-  desc: "MoviePro — Movies, Series & Anime with downloads & subtitles",
-  category: "download",
+  desc: "MoviePro — Movies & TV Series with downloads & subtitles",
+  category: "downloader",
   filename: __filename,
-}, async (conn, mek, m, { from, q, reply, sender }) => {
+}, async (conn, mek, m, { from, q, reply, sender, sessionId }) => {
   try {
-    if (!q?.trim()) return reply(
-      `🎬 *MoviePro Downloader*\n\n` +
-      `*Usage:* \`.moviepro <title>\`\n\n` +
-      `*Examples:*\n• \`.moviepro inception\`\n• \`.moviepro one piece\`\n• \`.moviepro avengers\`\n\n${FOOTER}`
-    );
+    const query = (q || "").trim();
+    if (!query) return reply("🎬 *MOVIEPRO*\n\nUsage: `.moviepro <title>`\n\nExample: `.mp inception`");
 
-    await conn.sendMessage(from, { react: { text: "🔍", key: mek.key } });
+    const settings = getSettings(sessionId);
+    const botName = settings.botName || config.PACKNAME || "SAYURA-LK-X-MINI";
 
-    let searchData;
-    try {
-      searchData = await search(q.trim());
-    } catch (e) {
-      return reply(`❌ *Search failed:* ${e.message}\n\n${FOOTER}`);
-    }
+    await conn.sendMessage(from, { react: { text: "🔎", key: mek.key } });
 
+    // ── Search ────────────────────────────────────────────────────────────────
+    const searchData = await retry(() => apiSearch(query), 3, 2000, "search");
     const results = searchData?.items || [];
-    if (!results.length) return reply(`❌ *"${q}"* — Results not found.\n\n${FOOTER}`);
+    if (!results.length) return reply("❎ Results not found.");
 
-    let listText = `🎬 *MoviePro Search*\n🔍 *"${q}"*\n\n`;
-    results.slice(0, 12).forEach((item, i) => {
-      const type = Number(item.subject_type) === 2 ? "📺" : "🎬";
-      const year = item.release_date ? ` _(${String(item.release_date).substring(0, 4)})_` : "";
-      const rating = item.imdb_rating_value > 0 ? ` ⭐${item.imdb_rating_value}` : "";
-      listText += `*${i + 1}.* ${type} ${item.title}${year}${rating}\n`;
-    });
-    listText += `\n*Number type කරන්න (reply ගහන්න ඕනෙ නෑ)*\n\n${FOOTER}`;
+    const display = results.slice(0, 10);
+    const cover = display[0]?.cover?.url || BANNER;
 
-    const cover = results[0]?.cover?.url;
-    let sentList = cover
-      ? await conn.sendMessage(from, { image: { url: cover }, caption: listText }, { quoted: mek })
-      : await conn.sendMessage(from, { text: listText }, { quoted: mek });
+    await conn.sendMessage(from, {
+      image: { url: cover },
+      caption: `🎬 *MoviePro Search*\nQuery: *${query}*`
+    }, { quoted: mek });
 
-    await conn.sendMessage(from, { react: { text: "✅", key: mek.key } });
+    const searchMsg = await conn.sendButton(from, {
+      header: "🎬 Select a title",
+      body: display.map((r, i) => {
+        const type = Number(r.subject_type) === 2 ? "📺" : "🎬";
+        const year = r.release_date ? ` (${String(r.release_date).substring(0, 4)})` : "";
+        const rating = r.imdb_rating_value > 0 ? ` ⭐${r.imdb_rating_value}` : "";
+        return `${i + 1}. ${type} ${r.title}${year}${rating}`;
+      }).join("\n"),
+      footer: botName,
+      buttons: display.map((r, i) => ({
+        text: `${i + 1}. ${Number(r.subject_type) === 2 ? "📺" : "🎬"} ${String(r.title).substring(0, 50)}`,
+        id: `mp_sel_${i}`,
+      })),
+    }, mek);
 
-    while (true) {
-      const sel = await waitReply(conn, from, sender, 120000);
-      if (!sel) break;
-      const idx = parseInt(sel.text) - 1;
-      if (isNaN(idx) || idx < 0 || idx >= results.length) continue;
-      handleItem(conn, from, sender, results[idx], sel.msg).catch(console.error);
-    }
+    // ── Selection — MULTI REPLY ───────────────────────────────────────────────
+    const searchHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== searchMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "mp_sel", display.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා — multi-reply
+      await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
+      handleItem(conn, from, sender, msg, display[idx], botName).catch(console.error);
+    };
+    conn.ev.on("messages.upsert", searchHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", searchHandler), TIMEOUT);
 
   } catch (e) {
-    console.error("[moviepro]", e);
-    reply(`❌ Error: ${e.message}\n\n${FOOTER}`);
+    console.error("[mp] error:", e);
+    reply(`❌ Error: ${e.message}`);
   }
 });
 
-// ── Item handler ──────────────────────────────────────────────────────────────
-async function handleItem(conn, from, sender, item, quotedMsg) {
+// ═════════════════════════════════════════════════════════════════════════════
+// ITEM ROUTER — decide movie vs series
+// ═════════════════════════════════════════════════════════════════════════════
+async function handleItem(conn, from, sender, quotedMsg, item, botName) {
   try {
-    await conn.sendMessage(from, { react: { text: "⏳", key: quotedMsg.key } });
-
     let isTV = Number(item.subject_type) === 2;
     let detail = item;
 
     try {
-      detail = await getDetails(item.subject_id);
+      detail = await retry(() => apiDetails(item.subject_id), 3, 2000, "details");
       if (Number(detail.subject_type) === 2) isTV = true;
-    } catch (e) {}
+    } catch (e) {
+      detail = item;
+    }
 
     let epCache = null;
 
     if (isTV) {
       try {
-        const epCheck = await getEpisodes(detail.subject_id);
+        const epCheck = await retry(() => apiEpisodes(detail.subject_id), 3, 2000, "episodes-check");
         const validSeasons = (epCheck.seasons || []).filter(
           s => s.total_episodes > 0 || (s.episodes || []).length > 0
         );
@@ -204,24 +237,26 @@ async function handleItem(conn, from, sender, item, quotedMsg) {
         } else {
           isTV = false;
         }
-      } catch (e) {}
+      } catch (e) { isTV = false; }
     }
 
     isTV
-      ? await handleSeries(conn, from, sender, detail, quotedMsg, epCache)
-      : await handleMovie(conn, from, sender, detail, quotedMsg);
+      ? await handleTVShow(conn, from, sender, quotedMsg, detail, epCache, botName)
+      : await handleMovie(conn, from, sender, quotedMsg, detail, botName);
 
   } catch (e) {
-    console.error("[handleItem]", e);
-    conn.sendMessage(from, { text: `❌ Error: ${e.message}\n\n${FOOTER}` }, { quoted: quotedMsg });
+    console.error("[mp] handleItem error:", e);
+    conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
   }
 }
 
-// ── Movie handler ─────────────────────────────────────────────────────────────
-async function handleMovie(conn, from, sender, detail, quotedMsg) {
+// ═════════════════════════════════════════════════════════════════════════════
+// MOVIE HANDLER
+// ═════════════════════════════════════════════════════════════════════════════
+async function handleMovie(conn, from, sender, quotedMsg, detail, botName) {
   try {
     const title = detail.title || "Movie";
-    const cover = detail.cover?.url || BANNER;
+    const poster = detail.cover?.url || BANNER;
     const year = String(detail.release_date || "").substring(0, 4);
     const rating = detail.imdb_rating_value || detail.imdb_rate || "N/A";
     const genre = (detail.genre || []).join(", ") || "N/A";
@@ -229,306 +264,425 @@ async function handleMovie(conn, from, sender, detail, quotedMsg) {
 
     let files = [];
     try {
-      const dlData = await getDownloads(detail.subject_id);
+      const dlData = await retry(() => apiDownloads(detail.subject_id), 3, 2000, "downloads");
       files = (dlData.files || []).filter(f => !Number(f.season) && !Number(f.episode));
       if (!files.length) files = dlData.files || [];
-    } catch {}
+    } catch (e) { log("downloads fetch failed:", e.message); }
 
-    let subs = [];
+    if (!files.length) return conn.sendMessage(from, { text: "❎ No download links." }, { quoted: quotedMsg });
+
+    files = files.slice(0, 8);
+
+    const caption =
+      `╭━━━〔 🎬 *${title}* 〕━━━⬣\n\n` +
+      `*▫️⭐ IMDB ➟* ${rating}\n` +
+      `*▫️🎭 Genre ➟* ${genre}\n` +
+      `*▫️📅 Year ➟* ${year}\n` +
+      (desc ? `\n_${desc}_\n` : "") +
+      `\n*⬇️ Qualities:*\n` +
+      files.map(f => `➤ ${fmtRes(f.resolution)} (${fmtSize(f.size)})`).join("\n") +
+      `\n╰━━━━━━━━━━━━━━━━━━⬣\n${CHANNEL}`;
+
+    const tb = await thumb(poster);
+    await conn.sendMessage(from, { image: { url: poster }, caption, jpegThumbnail: tb }, { quoted: quotedMsg });
+
+    const qualityMsg = await conn.sendButton(from, {
+      header: `🎬 ${title}`,
+      body: "Quality select කරන්න:",
+      footer: botName,
+      buttons: files.map((f, i) => ({
+        text: `${fmtRes(f.resolution).includes("1080") ? "🔥" : fmtRes(f.resolution).includes("720") ? "⚡" : "⬇️"} ${fmtRes(f.resolution)} (${fmtSize(f.size)})`,
+        id: `mp_q_${i}`,
+      })),
+    }, quotedMsg);
+
+    // Movie quality — MULTI REPLY
+    const qHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== qualityMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "mp_q", files.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා
+      await conn.sendMessage(from, { react: { text: "📥", key: msg.key } });
+      downloadFile(conn, from, msg, detail, files[idx], null, null, title, poster, botName).catch(console.error);
+    };
+    conn.ev.on("messages.upsert", qHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", qHandler), TIMEOUT);
+
+    // Subtitles (separate button, optional)
     if (files[0]?.resource_id) {
       try {
-        const subData = await apiGet(`/subtitles/${detail.subject_id}/${files[0].resource_id}`);
-        subs = subData.subtitles || [];
-      } catch {}
-    }
-
-    let caption =
-      `🎬 *${title}*\n\n` +
-      `*▫️⭐ IMDB* ☛ *_${rating}_*\n` +
-      `*▫️🎭 Genre* ☛ *_${genre}_*\n` +
-      `*▫️📅 Year* ☛ *_${year}_*\n` +
-      (desc ? `\n_${desc}_\n` : "") +
-      `\n*🎥 Download Options:*\n`;
-
-    const fileOptions = files.slice(0, 6);
-    fileOptions.forEach((f, i) => {
-      caption += `*${i + 1}.* 💎 ${fmtRes(f.resolution)} — 📦 ${fmtSize(f.size)}\n`;
-    });
-
-    const subOffset = fileOptions.length;
-    if (subs.length) {
-      caption += `\n*🔤 Subtitles (${subs.length}):*\n`;
-      subs.slice(0, 6).forEach((s, i) => {
-        caption += `*${subOffset + i + 1}.* ${s.lan_name || s.lan}\n`;
-      });
-    }
-
-    caption += `\n*Number type කරන්න*\n\n${FOOTER}`;
-
-    await conn.sendMessage(from, { image: { url: cover }, caption }, { quoted: quotedMsg });
-    await conn.sendMessage(from, { react: { text: "✅", key: quotedMsg.key } });
-
-    while (true) {
-      const sel = await waitReply(conn, from, sender, 120000);
-      if (!sel) break;
-      const choice = parseInt(sel.text);
-      if (isNaN(choice) || choice < 1) continue;
-
-      if (choice <= subOffset) {
-        const file = fileOptions[choice - 1];
-        if (!file) continue;
-        downloadFile(conn, from, sender, detail, file, null, null, sel.msg).catch(console.error);
-      } else {
-        const sub = subs[choice - subOffset - 1];
-        if (!sub) continue;
-        downloadSub(conn, from, detail, sub, null, null, sel.msg).catch(console.error);
-      }
+        const subData = await apiSubtitles(detail.subject_id, files[0].resource_id);
+        const subs = subData.subtitles || [];
+        if (subs.length) await sendSubtitleButton(conn, from, quotedMsg, detail, subs, title, null, null, botName);
+      } catch (e) { log("subtitle fetch failed:", e.message); }
     }
 
   } catch (e) {
-    console.error("[handleMovie]", e);
-    conn.sendMessage(from, { text: `❌ Error: ${e.message}\n\n${FOOTER}` }, { quoted: quotedMsg });
+    console.error("[mp] handleMovie error:", e);
+    conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
   }
 }
 
-// ── Series → Season select ────────────────────────────────────────────────────
-async function handleSeries(conn, from, sender, detail, quotedMsg, epCache) {
+// ═════════════════════════════════════════════════════════════════════════════
+// TV SHOW HANDLER
+// ═════════════════════════════════════════════════════════════════════════════
+async function handleTVShow(conn, from, sender, quotedMsg, detail, epCache, botName) {
   try {
     const title = detail.title || "Series";
-    const cover = detail.cover?.url || BANNER;
+    const poster = detail.cover?.url || BANNER;
     const seasons = detail.seasons?.seasons || [];
     const totalSeasons = detail.seasons?.total_seasons || seasons.length;
 
-    if (!totalSeasons) {
-      return conn.sendMessage(from, {
-        text: `❌ Season info not found for "${title}"\n\n${FOOTER}`
-      }, { quoted: quotedMsg });
+    if (!totalSeasons) return conn.sendMessage(from, { text: "❎ Season info not found." }, { quoted: quotedMsg });
+
+    const tb = await thumb(poster);
+
+    // Single season — go straight to episodes
+    if (seasons.length === 1) {
+      await showEpisodes(conn, from, sender, quotedMsg, title, poster, tb, detail, seasons[0].season_number, epCache, botName);
+      return;
     }
 
-    let text =
-      `📺 *${title}*\n\n` +
-      `*▫️⭐ IMDB* ☛ *_${detail.imdb_rating_value || "N/A"}_*\n` +
-      `*▫️🎭 Genre* ☛ *_${(detail.genre || []).join(", ") || "N/A"}_*\n\n` +
-      `*🗂 Season Select:*\n\n`;
+    // Multiple seasons — season select
+    const seasonCaption =
+      `╭━━━〔 📺 *${title}* 〕━━━⬣\n\n` +
+      `*▫️⭐ IMDB ➟* ${detail.imdb_rating_value || "N/A"}\n` +
+      `*▫️🎭 Genre ➟* ${(detail.genre || []).join(", ") || "N/A"}\n\n` +
+      `*🗂 Seasons: ${seasons.length}*\n` +
+      seasons.map(s => `➤ Season ${s.season_number}${s.total_episodes ? ` (${s.total_episodes} eps)` : ""}`).join("\n") +
+      `\n╰━━━━━━━━━━━━━━━━━━⬣`;
 
-    for (const sd of seasons) {
-      const sNum = sd.season_number;
-      text += `*${sNum}.* Season ${sNum}${sd.total_episodes ? ` _(${sd.total_episodes} eps)_` : ""}\n`;
-    }
-    text += `\n*Season number type කරන්න*\n\n${FOOTER}`;
+    await conn.sendMessage(from, { image: { url: poster }, caption: seasonCaption, jpegThumbnail: tb }, { quoted: quotedMsg });
 
-    await conn.sendMessage(from, { image: { url: cover }, caption: text }, { quoted: quotedMsg });
+    const seasonMsg = await conn.sendButton(from, {
+      header: `📺 ${title}`,
+      body: "Season select කරන්න:",
+      footer: botName,
+      buttons: seasons.map((s, i) => ({
+        text: `Season ${s.season_number}${s.total_episodes ? ` (${s.total_episodes} eps)` : ""}`,
+        id: `mp_se_${i}`,
+      })),
+    }, quotedMsg);
 
-    while (true) {
-      const sel = await waitReply(conn, from, sender, 120000);
-      if (!sel) break;
-      const sNum = parseInt(sel.text);
-      const validSeason = seasons.find(s => s.season_number === sNum);
-      if (!validSeason) continue;
-      handleEpisodeList(conn, from, sender, detail, sNum, sel.msg, epCache).catch(console.error);
-    }
+    // Season select — MULTI REPLY
+    const seHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== seasonMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "mp_se", seasons.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා
+      await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
+      showEpisodes(conn, from, sender, msg, title, poster, tb, detail, seasons[idx].season_number, epCache, botName).catch(console.error);
+    };
+    conn.ev.on("messages.upsert", seHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", seHandler), TIMEOUT);
 
   } catch (e) {
-    conn.sendMessage(from, { text: `❌ Error: ${e.message}\n\n${FOOTER}` }, { quoted: quotedMsg });
+    console.error("[mp] handleTVShow error:", e);
+    conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
   }
 }
 
-// ── Episode list ──────────────────────────────────────────────────────────────
-async function handleEpisodeList(conn, from, sender, detail, seasonNum, quotedMsg, epCache) {
+// ═════════════════════════════════════════════════════════════════════════════
+// EPISODE LIST
+// ═════════════════════════════════════════════════════════════════════════════
+async function showEpisodes(conn, from, sender, quotedMsg, title, poster, tb, detail, seasonNum, epCache, botName) {
   try {
-    await conn.sendMessage(from, { react: { text: "⏳", key: quotedMsg.key } });
-
     let epData = null;
     const cachedSeason = epCache?.seasons?.find(s => s.season === seasonNum);
 
     if (cachedSeason && (cachedSeason.episodes || []).length > 0) {
       epData = epCache;
     } else {
-      epData = await getEpisodes(detail.subject_id, seasonNum);
+      epData = await retry(() => apiEpisodes(detail.subject_id, seasonNum), 3, 2000, "episodes");
     }
 
     const seasonInfo = (epData.seasons || []).find(s => s.season === seasonNum);
     const episodes = seasonInfo?.episodes || [];
     const totalEps = seasonInfo?.total_episodes || episodes.length;
 
-    if (!episodes.length) {
-      return conn.sendMessage(from, {
-        text: `❌ Season ${seasonNum} episodes not found\n\n${FOOTER}`
-      }, { quoted: quotedMsg });
-    }
+    if (!episodes.length) return conn.sendMessage(from, { text: `❎ Season ${seasonNum} episodes not found.` }, { quoted: quotedMsg });
 
     async function showPage(start) {
-      const page = episodes.slice(start, start + 30);
-      let text = `📺 *${detail.title}* — Season ${seasonNum}\n`;
-      text += `*Episodes (${start + 1}–${start + page.length} of ${totalEps}):*\n\n`;
+      const page = episodes.slice(start, start + 10);
+      const hasMore = start + 10 < episodes.length;
 
+      let body = `📺 *${title}* — Season ${seasonNum}\n`;
+      body += `Episodes (${start + 1}–${start + page.length} of ${totalEps}):\n\n`;
+      body += `*0.* 🎯 සියලු Episodes (All)\n`;
       page.forEach((ep, i) => {
-        const displayNum = start + i + 1;
-        text += `*${displayNum}.* S${pad(seasonNum)}E${pad(ep.episode)}${ep.title ? ` — ${ep.title}` : ""}\n`;
+        body += `*${start + i + 1}.* S${pad(seasonNum)}E${pad(ep.episode)}${ep.title ? ` — ${ep.title}` : ""}\n`;
       });
 
-      const hasMore = start + 30 < episodes.length;
-      if (hasMore) text += `\n_"more" type කරන්න next page_\n`;
-      text += `\n*Number type කරන්න*\n\n${FOOTER}`;
+      const buttons = [{ text: "🎯 All Episodes (Season)", id: "mp_all_eps" }];
+      page.forEach((ep, i) => {
+        buttons.push({
+          text: `EP${ep.episode}${ep.title ? " — " + ep.title.substring(0, 25) : ""}`,
+          id: `mp_ep_${start + i}`,
+        });
+      });
+      if (hasMore) buttons.push({ text: "▶️ More episodes", id: `mp_more_${start + 10}` });
 
-      await conn.sendMessage(from, { text }, { quoted: quotedMsg });
-      await conn.sendMessage(from, { react: { text: "✅", key: quotedMsg.key } });
+      const epMsg = await conn.sendButton(from, {
+        header: `📺 Season ${seasonNum} (${totalEps} eps)`,
+        body,
+        footer: botName,
+        buttons,
+      }, quotedMsg);
 
-      while (true) {
-        const sel = await waitReply(conn, from, sender, 120000);
-        if (!sel) break;
+      const handler = async update => {
+        const msg = update.messages?.[0];
+        if (!msg?.message || msg.key.remoteJid !== from) return;
+        const ctx = replyCtx(msg.message);
+        if (!ctx || ctx.stanzaId !== epMsg.key.id) return;
+        const body2 = replyBody(msg.message);
 
-        if (sel.text.toLowerCase() === "more" && hasMore) {
-          await showPage(start + 30);
-          break;
+        // ── More pages ──
+        if (body2.startsWith("mp_more_")) {
+          const next = parseInt(body2.split("_")[2]);
+          conn.ev.off("messages.upsert", handler);
+          clearTimeout(timer);
+          await conn.sendMessage(from, { react: { text: "▶️", key: msg.key } });
+          await showPage(next);
+          return;
         }
 
-        const listNum = parseInt(sel.text);
-        if (isNaN(listNum) || listNum < 1 || listNum > episodes.length) continue;
+        // ── All episodes ──
+        if (body2 === "mp_all_eps" || body2.trim() === "0") {
+          conn.ev.off("messages.upsert", handler);
+          clearTimeout(timer);
+          await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
+          await downloadAllEpisodes(conn, from, sender, msg, title, poster, detail, episodes, seasonNum, botName);
+          return;
+        }
 
-        const ep = episodes[listNum - 1];
-        if (!ep) continue;
+        // ── Single episode ──
+        const idx = resolveIdx(body2, "mp_ep", episodes.length);
+        if (idx === -1) return;
+        // multi-reply: handler NOT removed — user can select multiple episodes
+        await conn.sendMessage(from, { react: { text: "⏳", key: msg.key } });
+        handleEpisode(conn, from, sender, msg, title, poster, tb, detail, episodes[idx], seasonNum, botName).catch(console.error);
+      };
 
-        handleEpisodeDownload(
-          conn, from, sender, detail,
-          seasonNum, ep.episode,
-          ep.title || `S${pad(seasonNum)}E${pad(ep.episode)}`,
-          sel.msg
-        ).catch(console.error);
-      }
+      const timer = setTimeout(() => conn.ev.off("messages.upsert", handler), TIMEOUT);
+      conn.ev.on("messages.upsert", handler);
     }
 
     await showPage(0);
 
   } catch (e) {
-    console.error("[handleEpisodeList]", e);
-    conn.sendMessage(from, { text: `❌ Error: ${e.message}\n\n${FOOTER}` }, { quoted: quotedMsg });
+    console.error("[mp] showEpisodes error:", e);
+    conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
   }
 }
 
-// ── Episode download options ──────────────────────────────────────────────────
-async function handleEpisodeDownload(conn, from, sender, detail, season, episode, epTitle, quotedMsg) {
+// ═════════════════════════════════════════════════════════════════════════════
+// ALL EPISODES DOWNLOAD
+// ═════════════════════════════════════════════════════════════════════════════
+async function downloadAllEpisodes(conn, from, sender, quotedMsg, title, poster, detail, episodes, seasonNum, botName) {
   try {
-    await conn.sendMessage(from, { react: { text: "⏳", key: quotedMsg.key } });
+    // First ep quality get
+    const firstEpData = await retry(() => apiEpisode(detail.subject_id, seasonNum, episodes[0].episode), 3, 2000, "first-ep");
+    const firstFiles = firstEpData?.files || [];
+    if (!firstFiles.length) return conn.sendMessage(from, { text: "❎ Download links not found." }, { quoted: quotedMsg });
 
-    const epData = await getEpisode(detail.subject_id, season, episode);
-    const files = epData.files || [];
-
-    if (!files.length) {
-      return conn.sendMessage(from, {
-        text: `❌ S${pad(season)}E${pad(episode)} files not found\n\n${FOOTER}`
-      }, { quoted: quotedMsg });
-    }
-
-    const cover = detail.cover?.url || BANNER;
-
-    let subs = [];
-    if (files[0]?.resource_id) {
-      try {
-        const subData = await apiGet(`/subtitles/${detail.subject_id}/${files[0].resource_id}`);
-        subs = subData.subtitles || [];
-      } catch {}
-    }
-
-    const epTag = `S${pad(season)}E${pad(episode)}`;
-    let caption =
-      `📺 *${detail.title}* — *${epTag}*\n` +
-      (epTitle && epTitle !== epTag ? `_${epTitle}_\n` : "") +
-      `\n*💎 Download Quality:*\n`;
-
-    files.forEach((f, i) => {
-      caption += `*${i + 1}.* ${fmtRes(f.resolution)} — 📦 ${fmtSize(f.size)}\n`;
+    let qText = `🎯 *All Episodes Quality Select*\n*${title} — Season ${seasonNum}*\n*Total: ${episodes.length} episodes*\n\n`;
+    firstFiles.forEach((f, i) => {
+      qText += `*${i + 1}.* ${fmtRes(f.resolution)} (${fmtSize(f.size)})\n`;
     });
 
-    const fileOffset = files.length;
-    if (subs.length) {
-      caption += `\n*🔤 Subtitles (${subs.length}):*\n`;
-      subs.slice(0, 6).forEach((s, i) => {
-        caption += `*${fileOffset + i + 1}.* ${s.lan_name || s.lan}\n`;
-      });
-    }
+    const qualityMsg = await conn.sendButton(from, {
+      header: `🎯 Season ${seasonNum} — All ${episodes.length} eps`,
+      body: qText + "\nQuality select කරන්න:",
+      footer: botName,
+      buttons: firstFiles.map((f, i) => ({
+        text: `${fmtRes(f.resolution).includes("1080") ? "🔥" : fmtRes(f.resolution).includes("720") ? "⚡" : "⬇️"} ${fmtRes(f.resolution)} (${fmtSize(f.size)})`,
+        id: `mp_aq_${i}`,
+      })),
+    }, quotedMsg);
 
-    caption += `\n*Number type කරන්න*\n\n${FOOTER}`;
+    makeListener(conn, from, qualityMsg.key.id, "mp_aq", firstFiles.length, async (qIdx, qMsg) => {
+      const chosenRes = fmtRes(firstFiles[qIdx].resolution);
+      await conn.sendMessage(from, { react: { text: "📥", key: qMsg.key } });
+      await conn.sendMessage(from, {
+        text:
+          `⬇️ *Downloading all ${episodes.length} episodes...*\n` +
+          `📺 *${title} — Season ${seasonNum}*\n` +
+          `💎 *Quality:* ${chosenRes}\n\n_Please wait..._`
+      }, { quoted: qMsg });
 
-    await conn.sendMessage(from, { image: { url: cover }, caption }, { quoted: quotedMsg });
-    await conn.sendMessage(from, { react: { text: "✅", key: quotedMsg.key } });
+      let success = 0, failed = 0;
 
-    while (true) {
-      const sel = await waitReply(conn, from, sender, 120000);
-      if (!sel) break;
-      const choice = parseInt(sel.text);
-      if (isNaN(choice) || choice < 1) continue;
+      for (const ep of episodes) {
+        try {
+          log(`📥 All-eps: EP${ep.episode}`);
+          const epData = await retry(() => apiEpisode(detail.subject_id, seasonNum, ep.episode), 3, 2000, `ep${ep.episode}`);
+          const epFiles = epData?.files || [];
 
-      if (choice <= fileOffset) {
-        const file = files[choice - 1];
-        if (!file) continue;
-        downloadFile(conn, from, sender, detail, file, season, episode, sel.msg).catch(console.error);
-      } else {
-        const sub = subs[choice - fileOffset - 1];
-        if (!sub) continue;
-        downloadSub(conn, from, detail, sub, season, episode, sel.msg).catch(console.error);
+          // Same quality index — fallback to first if not available
+          const file = epFiles[qIdx] || epFiles[0];
+          if (!file?.resource_link) { failed++; continue; }
+
+          const epTitle = `${title} S${pad(seasonNum)}E${pad(ep.episode)}`;
+          const epThumb = await thumb(poster);
+          const safeTitle = epTitle.replace(/[^\w\s\-]/g, "").replace(/\s+/g, "_").substring(0, 50);
+          const fileName = `🎬${botName}🎬${safeTitle}_(${fmtRes(file.resolution)}).mp4`;
+
+          const docMsg = await conn.sendMessage(from, {
+            document: { url: file.resource_link },
+            mimetype: "video/mp4",
+            fileName,
+            jpegThumbnail: epThumb,
+            caption:
+              `📺 *${epTitle}*\n` +
+              `💎 *Quality:* ${fmtRes(file.resolution)}\n` +
+              `📦 *Size:* ${fmtSize(file.size)}\n\n` +
+              `*⏤͟͟͞͞★❮ ${botName} 〽️𝗢𝗩𝗜𝗘𝗦 ❯⏤͟͟͞͞★*`,
+          }, { quoted: qMsg });
+
+          await conn.sendMessage(from, { react: { text: "✅", key: docMsg.key } });
+          success++;
+          log(`✅ All-eps: EP${ep.episode} done`);
+
+        } catch (e) {
+          failed++;
+          log(`❌ All-eps: EP${ep.episode} failed:`, e.message);
+          await conn.sendMessage(from, {
+            text: `❌ *EP${ep.episode} failed*\n${e.message}`
+          }, { quoted: qMsg });
+        }
       }
-    }
+
+      // Summary
+      await conn.sendMessage(from, {
+        text:
+          `${success === episodes.length ? "✅" : "⚠️"} *Download Complete!*\n\n` +
+          `📺 *${title} — Season ${seasonNum}*\n` +
+          `✅ *Success:* ${success}/${episodes.length}\n` +
+          `❌ *Failed:* ${failed}\n\n` +
+          `*⏤͟͟͞͞★❮ ${botName} 〽️𝗢𝗩𝗜𝗘𝗦 ❯⏤͟͟͞͞★*`
+      }, { quoted: qMsg });
+
+    });
 
   } catch (e) {
-    console.error("[handleEpisodeDownload]", e);
-    conn.sendMessage(from, { text: `❌ Error: ${e.message}\n\n${FOOTER}` }, { quoted: quotedMsg });
+    console.error("[mp] downloadAllEpisodes error:", e);
+    conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
   }
 }
 
-// ── File download ─────────────────────────────────────────────────────────────
-async function downloadFile(conn, from, sender, detail, file, season, episode, quotedMsg) {
-  const title = detail.title || "video";
-  const epTag = season ? `S${pad(season)}E${pad(episode)}` : "";
-  const res = fmtRes(file.resolution);
-  const safeTitle = title.replace(/[^\w\s\-]/g, "").replace(/\s+/g, "_").substring(0, 40);
-  const fileName = `SAYURA-LK_${safeTitle}${epTag ? "_" + epTag : ""}_${res}.mp4`;
-
+// ═════════════════════════════════════════════════════════════════════════════
+// EPISODE DETAIL + QUALITY SELECT
+// ═════════════════════════════════════════════════════════════════════════════
+async function handleEpisode(conn, from, sender, quotedMsg, seriesTitle, poster, tb, detail, ep, seasonNum, botName) {
   try {
-    await conn.sendMessage(from, { react: { text: "📥", key: quotedMsg.key } });
-    await conn.sendMessage(from, {
-      text:
-        `⏳ *Downloading...*\n\n` +
-        `🎬 *${title}*${epTag ? `\n📺 *Episode:* ${epTag}` : ""}\n` +
-        `💎 *Quality:* ${res}\n` +
-        `📦 *Size:* ${fmtSize(file.size)}\n\n` +
-        `_Please wait..._`
-    }, { quoted: quotedMsg });
+    const epData = await retry(() => apiEpisode(detail.subject_id, seasonNum, ep.episode), 3, 2000, "episode");
+    const files = epData?.files || [];
 
-    const dlUrl = file.resource_link;
-    if (!dlUrl) throw new Error("Download URL not found");
+    if (!files.length) return conn.sendMessage(from, { text: `❎ S${pad(seasonNum)}E${pad(ep.episode)} files not found.` }, { quoted: quotedMsg });
 
-    const thumb = await getThumbnail(detail.cover?.url || BANNER);
+    const epTag = `S${pad(seasonNum)}E${pad(ep.episode)}`;
+    const epTitle = `${seriesTitle} — ${epTag}`;
 
     const caption =
-      `✅ *Download Complete!*\n\n` +
-      `🎬 *${title}*${epTag ? `\n📺 *Episode:* ${epTag}` : ""}\n` +
-      `💎 *Quality:* ${res}\n` +
-      `📦 *Size:* ${fmtSize(file.size)}\n\n${FOOTER}`;
+      `╭━━━〔 📺 *${epTitle}* 〕━━━⬣\n\n` +
+      (ep.title ? `*▫️📝 ${ep.title}*\n\n` : "\n") +
+      `*⬇️ Qualities:*\n` +
+      files.map(f => `➤ ${fmtRes(f.resolution)} (${fmtSize(f.size)})`).join("\n") +
+      `\n╰━━━━━━━━━━━━━━━━━━⬣\n${CHANNEL}`;
 
-    await sendVideo(conn, from, quotedMsg, dlUrl, fileName, caption, thumb);
-    await conn.sendMessage(from, { react: { text: "✅", key: quotedMsg.key } });
+    await conn.sendMessage(from, { image: { url: poster }, caption, jpegThumbnail: tb }, { quoted: quotedMsg });
+
+    const qualityMsg = await conn.sendButton(from, {
+      header: `📺 ${epTitle}`,
+      body: "Quality select කරන්න:",
+      footer: botName,
+      buttons: files.map((f, i) => ({
+        text: `${fmtRes(f.resolution).includes("1080") ? "🔥" : fmtRes(f.resolution).includes("720") ? "⚡" : "⬇️"} ${fmtRes(f.resolution)} (${fmtSize(f.size)})`,
+        id: `mp_eq_${i}`,
+      })),
+    }, quotedMsg);
+
+    // Episode quality — MULTI REPLY
+    const eqHandler = async update => {
+      const msg = update.messages?.[0];
+      if (!msg?.message || msg.key.remoteJid !== from) return;
+      const ctx = replyCtx(msg.message);
+      if (!ctx || ctx.stanzaId !== qualityMsg.key.id) return;
+      const body = replyBody(msg.message);
+      const idx = resolveIdx(body, "mp_eq", files.length);
+      if (idx === -1) return;
+      // handler remove නොකරනවා
+      await conn.sendMessage(from, { react: { text: "📥", key: msg.key } });
+      downloadFile(conn, from, msg, detail, files[idx], seasonNum, ep.episode, epTitle, poster, botName).catch(console.error);
+    };
+    conn.ev.on("messages.upsert", eqHandler);
+    setTimeout(() => conn.ev.off("messages.upsert", eqHandler), TIMEOUT);
+
+    // Subtitles for this episode
+    if (files[0]?.resource_id) {
+      try {
+        const subData = await apiSubtitles(detail.subject_id, files[0].resource_id);
+        const subs = subData.subtitles || [];
+        if (subs.length) await sendSubtitleButton(conn, from, quotedMsg, detail, subs, seriesTitle, seasonNum, ep.episode, botName);
+      } catch (e) { log("subtitle fetch failed:", e.message); }
+    }
 
   } catch (e) {
-    console.error("[downloadFile]", e);
-    await conn.sendMessage(from, {
-      text: `❌ *Download failed*\n\n${e.message}\n\n${FOOTER}`
-    }, { quoted: quotedMsg });
-    await conn.sendMessage(from, { react: { text: "❌", key: quotedMsg.key } });
+    console.error("[mp] handleEpisode error:", e);
+    conn.sendMessage(from, { text: `❌ Error: ${e.message}` }, { quoted: quotedMsg });
   }
 }
 
-// ── Subtitle download ─────────────────────────────────────────────────────────
-async function downloadSub(conn, from, detail, sub, season, episode, quotedMsg) {
-  try {
-    await conn.sendMessage(from, { react: { text: "📥", key: quotedMsg.key } });
+// ═════════════════════════════════════════════════════════════════════════════
+// SUBTITLE BUTTON + DOWNLOAD
+// ═════════════════════════════════════════════════════════════════════════════
+async function sendSubtitleButton(conn, from, quotedMsg, detail, subs, title, seasonNum, episode, botName) {
+  const list = subs.slice(0, 10);
+  const epTag = seasonNum ? `S${pad(seasonNum)}E${pad(episode)}` : "";
 
-    const title = detail.title || "video";
-    const epTag = season ? `S${pad(season)}E${pad(episode)}` : "";
+  const subMsg = await conn.sendButton(from, {
+    header: "🔤 Subtitles",
+    body: `*${title}*${epTag ? ` — ${epTag}` : ""}\n\n` +
+      list.map((s, i) => `${i + 1}. ${s.lan_name || s.lan}`).join("\n") +
+      `\n\nSubtitle select කරන්න:`,
+    footer: botName,
+    buttons: list.map((s, i) => ({
+      text: `🔤 ${s.lan_name || s.lan}`,
+      id: `mp_sub_${i}`,
+    })),
+  }, quotedMsg);
+
+  const subHandler = async update => {
+    const msg = update.messages?.[0];
+    if (!msg?.message || msg.key.remoteJid !== from) return;
+    const ctx = replyCtx(msg.message);
+    if (!ctx || ctx.stanzaId !== subMsg.key.id) return;
+    const body = replyBody(msg.message);
+    const idx = resolveIdx(body, "mp_sub", list.length);
+    if (idx === -1) return;
+    // handler remove නොකරනවා — multi-reply
+    await conn.sendMessage(from, { react: { text: "📥", key: msg.key } });
+    downloadSub(conn, from, msg, detail, list[idx], title, seasonNum, episode, botName).catch(console.error);
+  };
+  conn.ev.on("messages.upsert", subHandler);
+  setTimeout(() => conn.ev.off("messages.upsert", subHandler), TIMEOUT);
+}
+
+async function downloadSub(conn, from, quotedMsg, detail, sub, title, seasonNum, episode, botName) {
+  try {
+    const epTag = seasonNum ? `S${pad(seasonNum)}E${pad(episode)}` : "";
     const langName = sub.lan_name || sub.lan || "Unknown";
     const baseName = `${title}${epTag ? " " + epTag : ""}`.replace(/[\\/:*?"<>|]/g, "");
 
-    const origRes = await axios.get(sub.url, { responseType: "arraybuffer", timeout: 30000 });
+    const origRes = await retry(() => axios.get(sub.url, { responseType: "arraybuffer", timeout: 30000 }), 3, 2000, "sub-download");
     await conn.sendMessage(from, {
       document: Buffer.from(origRes.data),
       mimetype: "application/x-subrip",
@@ -536,7 +690,7 @@ async function downloadSub(conn, from, detail, sub, season, episode, quotedMsg) 
       caption:
         `✅ *Subtitle Downloaded!*\n\n` +
         `🎬 *${title}*${epTag ? `\n📺 *Episode:* ${epTag}` : ""}\n` +
-        `🔤 *Language:* ${langName}\n\n${FOOTER}`
+        `🔤 *Language:* ${langName}\n\n${CHANNEL}`
     }, { quoted: quotedMsg });
 
     try {
@@ -550,17 +704,77 @@ async function downloadSub(conn, from, detail, sub, season, episode, quotedMsg) 
         caption:
           `✅ *Sinhala Subtitle!*\n\n` +
           `🎬 *${title}*${epTag ? `\n📺 *Episode:* ${epTag}` : ""}\n` +
-          `🔤 *Language:* Sinhala (Translated)\n\n${FOOTER}`
+          `🔤 *Language:* Sinhala (Translated)\n\n${CHANNEL}`
       }, { quoted: quotedMsg });
-    } catch {}
+    } catch (e) { log("sinhala translate failed:", e.message); }
 
     await conn.sendMessage(from, { react: { text: "✅", key: quotedMsg.key } });
 
   } catch (e) {
-    console.error("[downloadSub]", e);
-    await conn.sendMessage(from, {
-      text: `❌ *Subtitle failed*\n${e.message}\n\n${FOOTER}`
-    }, { quoted: quotedMsg });
+    console.error("[mp] downloadSub error:", e);
+    await conn.sendMessage(from, { text: `❌ *Subtitle failed*\n${e.message}` }, { quoted: quotedMsg });
     await conn.sendMessage(from, { react: { text: "❌", key: quotedMsg.key } });
   }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DOWNLOAD + SEND (movie file / episode file)
+// ═════════════════════════════════════════════════════════════════════════════
+async function downloadFile(conn, from, quotedMsg, detail, file, season, episode, title, poster, botName) {
+  const epTag = season ? `S${pad(season)}E${pad(episode)}` : "";
+  const res = fmtRes(file.resolution);
+  const safeTitle = title.replace(/[^\w\s\-]/g, "").replace(/\s+/g, "_").substring(0, 50);
+  const fileName = `🎬${botName}🎬${safeTitle}${epTag ? "_" + epTag : ""}_(${res}).mp4`;
+
+  try {
+    log("resolving download for:", title, res);
+
+    await conn.sendMessage(from, {
+      text:
+        `⏳ *Downloading...*\n\n` +
+        `🎬 *${title}*${epTag ? `\n📺 *Episode:* ${epTag}` : ""}\n` +
+        `💎 *Quality:* ${res}\n` +
+        `📦 *Size:* ${fmtSize(file.size)}\n\n_Please wait..._`
+    }, { quoted: quotedMsg });
+
+    const dlUrl = file.resource_link;
+    if (!dlUrl) throw new Error("Download URL not found");
+
+    const tb = await thumb(poster);
+
+    const caption =
+      `*𝗧ɪᴛʟᴇ : ${title}*${epTag ? `\n📺 *Episode:* ${epTag}` : ""}\n\n` +
+      `\`[${res} ${fmtSize(file.size)}]\`\n\n` +
+      `*⏤͟͟͞͞★❮ ${botName} 〽️𝗢𝗩𝗜𝗘𝗦 ❯⏤͟͟͞͞★*`;
+
+    try {
+      await conn.sendMessage(from, {
+        document: { url: dlUrl },
+        mimetype: "video/mp4",
+        fileName,
+        caption,
+        jpegThumbnail: tb,
+      }, { quoted: quotedMsg });
+    } catch (e) {
+      log("direct send failed, retrying via stream:", e.message);
+      const res2 = await axios.get(dlUrl, { responseType: "stream", timeout: 180000, maxRedirects: 5 });
+      await conn.sendMessage(from, {
+        document: { stream: res2.data },
+        mimetype: "video/mp4",
+        fileName,
+        caption,
+        jpegThumbnail: tb,
+      }, { quoted: quotedMsg });
+    }
+
+    await conn.sendMessage(from, { react: { text: "✅", key: quotedMsg.key } });
+    log("✅ sent:", fileName);
+
+  } catch (e) {
+    console.error("[mp] downloadFile error:", e);
+    await conn.sendMessage(from, { text: `❌ *Download failed*\n\n${e.message}` }, { quoted: quotedMsg });
+    await conn.sendMessage(from, { react: { text: "❌", key: quotedMsg.key } });
+  }
+}
+
+module.exports = {};
