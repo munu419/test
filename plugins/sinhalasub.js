@@ -2,9 +2,9 @@ const { cmd } = require("../command");
 const axios = require("axios");
 const sharp = require("sharp");
 
-const FOOTER = "⏤͟͟͞͞★❮  KAVi X MD 🎬 MOVIE ❯⏤͟͟͞͞★";
+const FOOTER = "⏤͟͟͞͞★❮  KAVI X MD 🎬 MOVIE ❯⏤͟͟͞͞★";
 const CHANNEL = "https://whatsapp.com/channel/0029Vb8VPsxBKfi2WHCVgV0J";
-const BANNER = "https://files.catbox.moe/04jdju.jpg";
+const BANNER = "https://files.catbox.moe/kmfr8j.jpg";
 
 const movieCache = new Map();
 
