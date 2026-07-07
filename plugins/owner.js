@@ -13,7 +13,7 @@ async (conn, mek, m, { from, pushname, sessionId }) => {
     try {
 
         const botName = getBotName(sessionId, "KAVI X MD");
-        const imageUrl = getBotLogo(sessionId, "https://files.catbox.moe/04jdju.jpg");
+        const imageUrl = getBotLogo(sessionId, "https://files.catbox.moe/kmfr8j.jpg");
 
         let dec = `
 ╔══════════════════════════╗
