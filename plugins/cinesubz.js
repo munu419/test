@@ -11,7 +11,7 @@ const { getContentType } = require("@whiskeysockets/baileys");
 
 const API_BASE  = "https://mr-thinuzz-api-build.vercel.app/api/cinesubz";
 const API_KEY   = "key_faa62e4037a95cda";
-const CHANNEL   = "https://whatsapp.com/channel/0029VbCvEPYF6smqypvOM042";
+const CHANNEL   = "https://whatsapp.com/channel/0029Vb8VPsxBKfi2WHCVgV0J";
 const BANNER    = "https://files.catbox.moe/04jdju.jpg";
 const TIMEOUT   = 5 * 60 * 1000;
 const sleep     = ms => new Promise(r => setTimeout(r, ms));
