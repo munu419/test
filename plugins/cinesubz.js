@@ -124,6 +124,13 @@ function resolveIdx(body, prefix, max) {
   return -1;
 }
 
+// Matches either the "cs2_..._details" button id, or the extra trailing
+// number that appears right after the quality list in the text fallback.
+function isDetailsReply(body, prefix, qualityCount) {
+  if (body === `${prefix}_details`) return true;
+  return body.trim() === String(qualityCount + 1);
+}
+
 // ── Listener factory ──────────────────────────────────────────────────────────
 function makeListener(conn, from, msgId, prefix, max, onSelect, onTimeout) {
   const handler = async update => {
@@ -239,6 +246,8 @@ async function handleMovie(conn, from, sender, quotedMsg, item, botName) {
     const cast = Array.isArray(movie.cast)
       ? movie.cast.slice(0, 4).map(c => c.actor?.name || c.name).join(", ")
       : "N/A";
+    const rating = movie.imdb?.value || movie.rating?.value || "N/A";
+    const plot = movie.description || "No description available.";
 
     const downloads = (movie.downloadUrl || []).sort((a, b) => {
       const r = s => parseInt((s.quality || "").match(/\d+/)?.[0]) || 0;
@@ -258,14 +267,18 @@ async function handleMovie(conn, from, sender, quotedMsg, item, botName) {
     const tb = await thumb(poster);
     await conn.sendMessage(from, { image: { url: poster }, caption, jpegThumbnail: tb }, { quoted: quotedMsg });
 
+    // Quality buttons + an extra "Details Card" option appended at the end
+    const qualityButtons = downloads.map((d, i) => ({
+      text: `${d.quality?.includes("1080") ? "🔥" : d.quality?.includes("720") ? "⚡" : "⬇️"} ${d.quality} (${d.size || "?"})`,
+      id: `cs2_q_${i}`,
+    }));
+    qualityButtons.push({ text: "📑 Details Card", id: "cs2_q_details" });
+
     const qualityMsg = await conn.sendButton(from, {
       header: `🎬 ${title}`,
       body: "Quality select කරන්න:",
       footer: botName,
-      buttons: downloads.map((d, i) => ({
-        text: `${d.quality?.includes("1080") ? "🔥" : d.quality?.includes("720") ? "⚡" : "⬇️"} ${d.quality} (${d.size || "?"})`,
-        id: `cs2_q_${i}`,
-      })),
+      buttons: qualityButtons,
     }, quotedMsg);
 
     // Movie quality — MULTI REPLY
@@ -275,6 +288,23 @@ async function handleMovie(conn, from, sender, quotedMsg, item, botName) {
       const ctx = replyCtx(msg.message);
       if (!ctx || ctx.stanzaId !== qualityMsg.key.id) return;
       const body = replyBody(msg.message);
+
+      // ── Details Card — extra option after the quality list ──
+      if (isDetailsReply(body, "cs2_q", downloads.length)) {
+        await conn.sendMessage(from, { react: { text: "📋", key: msg.key } });
+        const detailsCaption =
+          `*☘️ 𝗧ɪᴛʟᴇ : ${title}*\n\n` +
+          `*▫️🕵️ Cast ➟* ${cast}\n` +
+          `*▫️📅 Year ➟* ${movie.dateCreate || item.year || "N/A"}\n` +
+          `*▫️⭐ Rating ➟* ${rating}\n\n` +
+          `*▫️📖 Description ➟* ${plot}\n\n` +
+          `*➟➟➟➟➟➟➟➟➟➟➟➟➟➟➟*\n` +
+          `*👥 𝙵𝙾𝙻𝙻𝙾𝚆 𝙾𝚄𝚁 𝙲𝙷𝙰𝙽𝙽𝙴𝙻 ➟* ${CHANNEL}\n` +
+          `*➟➟➟➟➟➟➟➟➟➟➟➟➟➟➟*`;
+        await conn.sendMessage(from, { image: { url: poster }, caption: detailsCaption }, { quoted: msg });
+        return;
+      }
+
       const idx = resolveIdx(body, "cs2_q", downloads.length);
       if (idx === -1) return;
       // handler remove නොකරනවා
@@ -575,14 +605,18 @@ async function handleEpisode(conn, from, sender, quotedMsg, seriesTitle, poster,
     const epThumb = await thumb(epPoster);
     await conn.sendMessage(from, { image: { url: epPoster }, caption, jpegThumbnail: epThumb }, { quoted: quotedMsg });
 
+    // Quality buttons + an extra "Details Card" option appended at the end
+    const qualityButtons = downloads.map((d, i) => ({
+      text: `${d.quality?.includes("1080") ? "🔥" : d.quality?.includes("720") ? "⚡" : "⬇️"} ${d.quality} (${d.size || "?"})`,
+      id: `cs2_eq_${i}`,
+    }));
+    qualityButtons.push({ text: "📑 Details Card", id: "cs2_eq_details" });
+
     const qualityMsg = await conn.sendButton(from, {
       header: `📺 ${epTitle}`,
       body: "Quality select කරන්න:",
       footer: botName,
-      buttons: downloads.map((d, i) => ({
-        text: `${d.quality?.includes("1080") ? "🔥" : d.quality?.includes("720") ? "⚡" : "⬇️"} ${d.quality} (${d.size || "?"})`,
-        id: `cs2_eq_${i}`,
-      })),
+      buttons: qualityButtons,
     }, quotedMsg);
 
     // Episode quality — MULTI REPLY
@@ -592,6 +626,22 @@ async function handleEpisode(conn, from, sender, quotedMsg, seriesTitle, poster,
       const ctx = replyCtx(msg.message);
       if (!ctx || ctx.stanzaId !== qualityMsg.key.id) return;
       const body = replyBody(msg.message);
+
+      // ── Details Card — extra option after the quality list ──
+      if (isDetailsReply(body, "cs2_eq", downloads.length)) {
+        await conn.sendMessage(from, { react: { text: "📋", key: msg.key } });
+        const detailsCaption =
+          `*☘️ 𝗧ɪᴛʟᴇ : ${epTitle}*\n\n` +
+          `*▫️📅 Date ➟* ${ep.date || "N/A"}\n\n` +
+          `*⬇️ Qualities:*\n` +
+          downloads.map(d => `➤ ${d.quality} (${d.size || "?"}) [${d.language || ""}]`).join("\n") + `\n\n` +
+          `*➟➟➟➟➟➟➟➟➟➟➟➟➟➟➟*\n` +
+          `*👥 𝙵𝙾𝙻𝙻𝙾𝚆 𝙾𝚄𝚁 𝙲𝙷𝙰𝙽𝙽𝙴𝙻 ➟* ${CHANNEL}\n` +
+          `*➟➟➟➟➟➟➟➟➟➟➟➟➟➟➟*`;
+        await conn.sendMessage(from, { image: { url: epPoster }, caption: detailsCaption }, { quoted: msg });
+        return;
+      }
+
       const idx = resolveIdx(body, "cs2_eq", downloads.length);
       if (idx === -1) return;
       // handler remove නොකරනවා
