@@ -1,6 +1,8 @@
 // plugins/cinesubz2.js
 // CineSubz — Movies + TV Series full support
-// API: mr-thinuzz-api-build.vercel.app
+// API: cinesubznew.vercel.app (no API key needed; /download already
+// resolves countdown -> sonic-cloud -> bypass server-side and returns a
+// single final link, or a list of csplayer mirrors)
 
 const { cmd } = require("../command");
 const axios = require("axios");
@@ -9,8 +11,7 @@ const config = require("../config");
 const { getSettings } = require("../lib/settings");
 const { getContentType } = require("@whiskeysockets/baileys");
 
-const API_BASE  = "https://mr-thinuzz-api-build.vercel.app/api/cinesubz";
-const API_KEY   = "key_faa62e4037a95cda";
+const API_BASE  = "https://cinesubznew.vercel.app";
 const CHANNEL   = "https://whatsapp.com/channel/0029Vb8VPsxBKfi2WHCVgV0J";
 const BANNER    = "https://files.catbox.moe/kmfr8j.jpg";
 const TIMEOUT   = 5 * 60 * 1000;
@@ -34,50 +35,107 @@ async function retry(fn, tries = 3, delay = 2000, label = "") {
 // ── API calls ─────────────────────────────────────────────────────────────────
 async function apiSearch(query) {
   const { data } = await axios.get(`${API_BASE}/search`, {
-    params: { query, apiKey: API_KEY }, timeout: 30000
+    params: { q: query }, timeout: 30000
   });
-  if (!data.status) throw new Error("Search API error");
-  return data.data?.all || [];
+  const list = data.results || [];
+  // Adapt to the shape the rest of this file expects: {title, type, link, image}
+  return list.map(r => ({
+    title: r.title,
+    type: (r.type || "").toLowerCase() === "tvshow" ? "TV" : "MOVIE",
+    link: r.movie_url,
+    image: undefined,
+    year: undefined,
+  }));
 }
 
 async function apiMovie(url) {
-  const { data } = await axios.get(`${API_BASE}/movie`, {
-    params: { url, apiKey: API_KEY }, timeout: 30000
+  const { data } = await axios.get(`${API_BASE}/details`, {
+    params: { url }, timeout: 30000
   });
-  if (!data.status) throw new Error("Movie API error");
-  return data.data;
+  const info = data.movie_info || {};
+  const downloadUrl = (data.download_links || []).map(d => ({
+    quality: d.quality,
+    size: d.size,
+    link: d.countdown_url,
+  }));
+  // Shaped like the old API's movie object so the rest of this file
+  // (captions, filenames, etc.) doesn't need to change.
+  return {
+    maintitle: info.title,
+    mainImage: data.poster_url,
+    dateCreate: info.year,
+    imdb: { value: info.rating },
+    description: info.description,
+    genres: info.genres,
+    downloadUrl,
+  };
 }
 
 async function apiTvShow(url) {
-  const { data } = await axios.get(`${API_BASE}/tvshow`, {
-    params: { url, apiKey: API_KEY }, timeout: 30000
+  const { data } = await axios.get(`${API_BASE}/episodes`, {
+    params: { url }, timeout: 30000
   });
-  if (!data.status) throw new Error("TVShow API error");
-  return data.data;
+  const episodesDetails = (data.seasons || []).map(s => ({
+    season: s.season,
+    episodes: (s.episodes || []).map(e => ({
+      number: e.episode,
+      title: e.title,
+      url: e.url,
+      date: e.date,
+      image: e.image,
+    })),
+  }));
+  return {
+    maintitle: data.title,
+    mainImage: data.poster,
+    episodesDetails,
+  };
 }
 
 async function apiEpisode(url) {
-  const { data } = await axios.get(`${API_BASE}/episode`, {
-    params: { url, apiKey: API_KEY }, timeout: 30000
+  const { data } = await axios.get(`${API_BASE}/episode-details`, {
+    params: { url }, timeout: 30000
   });
-  if (!data.status) throw new Error("Episode API error");
-  return data.data;
+  const downloadUrl = (data.downloadLinks || []).map(d => ({
+    quality: d.quality,
+    size: d.size,
+    link: d.countdown_url,
+  }));
+  return {
+    imageUrls: data.poster ? [data.poster] : [],
+    downloadUrl,
+  };
 }
 
-async function apiDownload(url) {
+// Resolves a countdown_url straight to a final playable/downloadable link.
+// The /download endpoint already does countdown -> sonic-cloud -> bypass
+// resolution server-side, so this now returns ONE final URL string
+// instead of a list that needed a separate bestLink() pass.
+async function apiDownload(countdownUrl) {
   const { data } = await axios.get(`${API_BASE}/download`, {
-    params: { url, apiKey: API_KEY }, timeout: 60000
+    params: { url: countdownUrl }, timeout: 60000
   });
-  if (!data.status) throw new Error("Download API error");
-  return data.data?.downloadUrls || [];
+
+  if (!data.success) {
+    const extra = data.server_page ? ` (manual link: ${data.server_page})` : "";
+    throw new Error((data.message || "Download API error") + extra);
+  }
+
+  if (data.link_type === "csplayer" && Array.isArray(data.download_options) && data.download_options.length) {
+    const urls = data.download_options.map(o => o.download_url).filter(Boolean);
+    return bestLink(urls) || urls[0];
+  }
+
+  if (data.download_url) return data.download_url;
+  throw new Error("No usable download link found");
 }
 
-// ── Best download link ────────────────────────────────────────────────────────
-function bestLink(links) {
-  if (!links?.length) return null;
-  // Prefer direct HTTP (non-telegram)
-  const direct = links.find(l => l.url && l.url.startsWith("http") && !l.url.includes("t.me"));
-  return (direct || links[0])?.url || null;
+// ── Best download link (now works on a plain array of URL strings —
+//    only used internally by apiDownload() to pick among csplayer mirrors) ──
+function bestLink(urls) {
+  if (!urls?.length) return null;
+  const direct = urls.find(u => u && u.startsWith("http") && !u.includes("t.me"));
+  return direct || urls[0] || null;
 }
 
 // ── Thumbnail ─────────────────────────────────────────────────────────────────
@@ -245,7 +303,7 @@ async function handleMovie(conn, from, sender, quotedMsg, item, botName) {
     const poster = movie.mainImage || item.image || BANNER;
     const cast = Array.isArray(movie.cast)
       ? movie.cast.slice(0, 4).map(c => c.actor?.name || c.name).join(", ")
-      : "N/A";
+      : (Array.isArray(movie.genres) && movie.genres.length ? movie.genres.join(", ") : "N/A");
     const rating = movie.imdb?.value || movie.rating?.value || "N/A";
     const plot = movie.description || "No description available.";
 
@@ -258,7 +316,7 @@ async function handleMovie(conn, from, sender, quotedMsg, item, botName) {
 
     const caption =
       `╭━━━〔 🎬 *${title}* 〕━━━⬣\n\n` +
-      `*▫️🕵️ Cast ➟* ${cast}\n` +
+      `*▫️🕵️ Genre ➟* ${cast}\n` +
       `*▫️📅 Year ➟* ${movie.dateCreate || item.year || "N/A"}\n\n` +
       `*⬇️ Qualities:*\n` +
       downloads.map(d => `➤ ${d.quality} (${d.size || "?"})`).join("\n") +
@@ -294,7 +352,7 @@ async function handleMovie(conn, from, sender, quotedMsg, item, botName) {
         await conn.sendMessage(from, { react: { text: "📋", key: msg.key } });
         const detailsCaption =
           `*☘️ 𝗧ɪᴛʟᴇ : ${title}*\n\n` +
-          `*▫️🕵️ Cast ➟* ${cast}\n` +
+          `*▫️🕵️ Genre ➟* ${cast}\n` +
           `*▫️📅 Year ➟* ${movie.dateCreate || item.year || "N/A"}\n` +
           `*▫️⭐ Rating ➟* ${rating}\n\n` +
           `*▫️📖 Description ➟* ${plot}\n\n` +
@@ -526,8 +584,14 @@ async function downloadAllEpisodes(conn, from, sender, quotedMsg, title, poster,
           if (!dl) { failed++; continue; }
 
           const epTitle = `${title} S${String(seasonNum).padStart(2,"0")}E${String(ep.number).padStart(2,"0")}`;
-          const links = await retry(() => apiDownload(dl.link), 3, 3000, `dl-ep${ep.number}`);
-          const url = bestLink(links);
+
+          let url;
+          try {
+            url = await retry(() => apiDownload(dl.link), 3, 3000, `dl-ep${ep.number}`);
+          } catch (dlErr) {
+            log(`❌ All-eps: EP${ep.number} link resolve failed:`, dlErr.message);
+            failed++; continue;
+          }
           if (!url) { failed++; continue; }
 
           const epPoster = epData.imageUrls?.[0] || poster;
@@ -662,16 +726,15 @@ async function handleEpisode(conn, from, sender, quotedMsg, seriesTitle, poster,
 // ═════════════════════════════════════════════════════════════════════════════
 async function downloadAndSend(conn, from, quotedMsg, qualityObj, title, poster, botName) {
   try {
-    const sonicUrl = qualityObj.link;
-    log("resolving download for:", sonicUrl);
+    const countdownUrl = qualityObj.link;
+    log("resolving download for:", countdownUrl);
 
     await conn.sendMessage(from, {
       text: `⏳ *Resolving link...*\n📺 *${title}*\n💎 *${qualityObj.quality}* (${qualityObj.size || "?"})\n\n_Please wait..._`
     }, { quoted: quotedMsg });
 
-    const links = await retry(() => apiDownload(sonicUrl), 3, 3000, "download");
-    const url = bestLink(links);
-    log("best link:", url);
+    const url = await retry(() => apiDownload(countdownUrl), 3, 3000, "download");
+    log("resolved link:", url);
 
     if (!url) throw new Error("No usable download link found");
 
