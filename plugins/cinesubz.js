@@ -3,6 +3,14 @@
 // API: cinesubznew.vercel.app (no API key needed; /download already
 // resolves countdown -> sonic-cloud -> bypass server-side and returns a
 // single final link, or a list of csplayer mirrors)
+//
+// NOTE: cinesubznew's own sonic-cloud resolve step isn't reliable, so
+// apiDownload() falls back to our own bypass server whenever the
+// /download response hands back an unresolved sonic-cloud link instead of
+// a final playable url.
+//
+// Bypass server response shape (confirmed):
+// { "success": true, "count": 1, "download_urls": ["https://.../file.mp4?token=..."] }
 
 const { cmd } = require("../command");
 const axios = require("axios");
@@ -11,11 +19,12 @@ const config = require("../config");
 const { getSettings } = require("../lib/settings");
 const { getContentType } = require("@whiskeysockets/baileys");
 
-const API_BASE  = "https://cinesubznew.vercel.app";
-const CHANNEL   = "https://whatsapp.com/channel/0029Vb8VPsxBKfi2WHCVgV0J";
-const BANNER    = "https://files.catbox.moe/kmfr8j.jpg";
-const TIMEOUT   = 5 * 60 * 1000;
-const sleep     = ms => new Promise(r => setTimeout(r, ms));
+const API_BASE     = "https://cinesubznew.vercel.app";
+const BYPASS_BASE  = "https://sa-production-63e6.up.railway.app/bypass";
+const CHANNEL      = "https://whatsapp.com/channel/0029Vb8VPsxBKfi2WHCVgV0J";
+const BANNER       = "https://files.catbox.moe/kmfr8j.jpg";
+const TIMEOUT       = 5 * 60 * 1000;
+const sleep         = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 function log(...a) { console.log(`[cs2] [${new Date().toISOString()}]`, ...a); }
@@ -30,6 +39,31 @@ async function retry(fn, tries = 3, delay = 2000, label = "") {
       await sleep(delay * i);
     }
   }
+}
+
+// ── Sonic-cloud bypass helper ──────────────────────────────────────────────────
+// Resolves a sonic-cloud (or any similarly protected) url straight to a
+// final downloadable link via our own bypass server.
+// Response shape: { success, count, download_urls: [url, ...] }
+async function bypassResolve(sonicUrl) {
+  const { data } = await axios.get(BYPASS_BASE, {
+    params: { url: sonicUrl }, timeout: 60000
+  });
+
+  if (!data.success || !Array.isArray(data.download_urls) || !data.download_urls.length) {
+    throw new Error("Bypass server returned no link");
+  }
+
+  const resolved = bestLink(data.download_urls);
+  if (!resolved) throw new Error("Bypass server returned no usable link");
+  return resolved;
+}
+
+// Heuristic: does this url look like an unresolved sonic-cloud link that
+// still needs to go through the bypass server?
+function looksLikeSonicCloud(url) {
+  if (!url) return false;
+  return /sonic[-_]?cloud/i.test(url) || /\/sonic\//i.test(url);
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
@@ -107,10 +141,11 @@ async function apiEpisode(url) {
   };
 }
 
-// Resolves a countdown_url straight to a final playable/downloadable link.
-// The /download endpoint already does countdown -> sonic-cloud -> bypass
-// resolution server-side, so this now returns ONE final URL string
-// instead of a list that needed a separate bestLink() pass.
+// Resolves a countdown_url to a final playable/downloadable link.
+// The /download endpoint attempts countdown -> sonic-cloud -> bypass
+// resolution server-side, but the sonic-cloud step there isn't reliable,
+// so whenever we get back an unresolved sonic-cloud style link (or no
+// link_type match), we run it through our own bypass server instead.
 async function apiDownload(countdownUrl) {
   const { data } = await axios.get(`${API_BASE}/download`, {
     params: { url: countdownUrl }, timeout: 60000
@@ -121,17 +156,36 @@ async function apiDownload(countdownUrl) {
     throw new Error((data.message || "Download API error") + extra);
   }
 
+  // csplayer mirrors — pick the best direct one
   if (data.link_type === "csplayer" && Array.isArray(data.download_options) && data.download_options.length) {
     const urls = data.download_options.map(o => o.download_url).filter(Boolean);
-    return bestLink(urls) || urls[0];
+    const picked = bestLink(urls) || urls[0];
+    if (picked && looksLikeSonicCloud(picked)) {
+      log("csplayer link looks like sonic-cloud, bypassing:", picked);
+      return await retry(() => bypassResolve(picked), 3, 3000, "bypass-csplayer");
+    }
+    return picked;
   }
 
-  if (data.download_url) return data.download_url;
+  // Direct final link already resolved server-side
+  if (data.download_url && !looksLikeSonicCloud(data.download_url)) {
+    return data.download_url;
+  }
+
+  // Unresolved sonic-cloud link — some field might carry it explicitly,
+  // fall back to download_url if that's all we have
+  const sonicCandidate = data.sonic_cloud_url || data.sonicUrl || data.sonic_url || data.download_url;
+  if (sonicCandidate) {
+    log("resolving sonic-cloud link via bypass:", sonicCandidate);
+    return await retry(() => bypassResolve(sonicCandidate), 3, 3000, "bypass");
+  }
+
   throw new Error("No usable download link found");
 }
 
-// ── Best download link (now works on a plain array of URL strings —
-//    only used internally by apiDownload() to pick among csplayer mirrors) ──
+// ── Best download link (plain array of URL strings — used both by
+//    apiDownload() for csplayer mirrors and by bypassResolve() for the
+//    bypass server's download_urls array) ──
 function bestLink(urls) {
   if (!urls?.length) return null;
   const direct = urls.find(u => u && u.startsWith("http") && !u.includes("t.me"));
