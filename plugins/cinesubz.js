@@ -66,6 +66,27 @@ function looksLikeSonicCloud(url) {
   return /sonic[-_]?cloud/i.test(url) || /\/sonic\//i.test(url);
 }
 
+// ── google.com/serverN -> real sonic-cloud domain transform ────────────────
+// cinesubznew's own backend has an incomplete urlMappings table (only
+// server1-6 are mapped) AND its internal SA_BYPASS_API call is missing the
+// "https://" protocol, so its server-side bypass silently always fails and
+// falls back to a static scrape that can't handle JS-rendered sonic-cloud
+// pages. For anything outside server1-6 (e.g. server7, server8, ...) it just
+// hands back the untransformed "google.com/serverN/..." placeholder as
+// server_page. We do the domain swap ourselves here before bypassing.
+function toSonicCloudUrl(googleUrl) {
+  let url = googleUrl.replace(
+    /^https?:\/\/google\.com\/server(\d+)\/(?:1:\/)?/i,
+    "https://bot3.sonic-cloud.online/server$1/"
+  );
+  if (!/\?ext=/i.test(url)) {
+    if (/\.mp4(\?|$)/i.test(url)) url = url.replace(/\.mp4/i, "?ext=mp4");
+    else if (/\.mkv(\?|$)/i.test(url)) url = url.replace(/\.mkv/i, "?ext=mkv");
+    else if (/\.zip(\?|$)/i.test(url)) url = url.replace(/\.zip/i, "?ext=zip");
+  }
+  return url;
+}
+
 // ── API calls ─────────────────────────────────────────────────────────────────
 async function apiSearch(query) {
   const { data } = await axios.get(`${API_BASE}/search`, {
@@ -151,15 +172,33 @@ async function apiDownload(countdownUrl) {
     params: { url: countdownUrl }, timeout: 60000
   });
 
+  // cinesubznew's own sonic-cloud extraction failed — but it still hands
+  // back the sonic-cloud page url as server_page. Send THAT through our
+  // own bypass server instead of giving up.
   if (!data.success) {
-    const extra = data.server_page ? ` (manual link: ${data.server_page})` : "";
-    throw new Error((data.message || "Download API error") + extra);
+    if (data.server_page) {
+      let sonicUrl = data.server_page;
+      log("⚠️ cinesubznew resolve failed:", data.message);
+      log("⚠️ raw server_page value:", JSON.stringify(sonicUrl));
+
+      // Fix the backend's broken google.com/serverN placeholder if present
+      if (/google\.com\/server/i.test(sonicUrl)) {
+        sonicUrl = toSonicCloudUrl(sonicUrl);
+        log("⚠️ transformed to real sonic-cloud url:", sonicUrl);
+      }
+
+      return await retry(() => bypassResolve(sonicUrl), 3, 3000, "bypass-serverpage");
+    }
+    throw new Error(data.message || "Download API error");
   }
 
   // csplayer mirrors — pick the best direct one
   if (data.link_type === "csplayer" && Array.isArray(data.download_options) && data.download_options.length) {
     const urls = data.download_options.map(o => o.download_url).filter(Boolean);
-    const picked = bestLink(urls) || urls[0];
+    let picked = bestLink(urls) || urls[0];
+    if (picked && /google\.com\/server/i.test(picked)) {
+      picked = toSonicCloudUrl(picked);
+    }
     if (picked && looksLikeSonicCloud(picked)) {
       log("csplayer link looks like sonic-cloud, bypassing:", picked);
       return await retry(() => bypassResolve(picked), 3, 3000, "bypass-csplayer");
@@ -821,4 +860,4 @@ async function downloadAndSend(conn, from, quotedMsg, qualityObj, title, poster,
   }
 }
 
-module.exports = {};
+module.exports = {};        
